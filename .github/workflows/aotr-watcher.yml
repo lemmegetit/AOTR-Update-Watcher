@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"   # every 10 minutes (GitHub's minimum is 5)
   workflow_dispatch:          # lets you start it by hand from the Actions tab
+    inputs:
+      preview:
+        description: "Post a sample alert to Discord (saves nothing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write             # needed to save aotr_state.json back to the repo
@@ -19,14 +24,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for an AOTR update
+      - name: Check for AOTR place updates
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python3 aotr_update_watcher.py --once
+          PREVIEW: ${{ inputs.preview }}
+        run: |
+          if [ "$PREVIEW" = "true" ]; then
+            python3 aotr_update_watcher.py --preview
+          else
+            python3 aotr_update_watcher.py --once
+          fi
 
-      - name: Remember the latest update
+      - name: Remember the latest updates
         run: |
           git config user.name "aotr-watcher"
           git config user.email "aotr-watcher@users.noreply.github.com"
           git add aotr_state.json
-          git diff --staged --quiet || (git commit -m "Update state" && git push)
+          git diff --staged --quiet || (git commit -m "Update state" && git pull --rebase && git push)
