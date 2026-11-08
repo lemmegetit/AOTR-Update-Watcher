@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-AOTR update watcher -> Discord webhook
+AOTR place update tracker -> Discord webhook
 
-Polls Roblox for the game's "last updated" time and posts to your Discord
-webhook whenever it changes. Standard library only (Python 3.8+).
+Tracks every place (map) inside the AOTR game and posts a Discord embed when
+one or more of them get a new version. Standard library only (Python 3.8+).
 
-Setup:
-  1. Discord: Server Settings > Integrations > Webhooks > New Webhook > Copy URL
-  2. export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
-  3. python3 aotr_update_watcher.py          # runs forever, checks every 5 min
-     python3 aotr_update_watcher.py --once   # single check (for cron / CI)
+  python3 aotr_update_watcher.py            # check forever, every 5 minutes
+  python3 aotr_update_watcher.py --once     # single check (cron / GitHub Actions)
+  python3 aotr_update_watcher.py --preview  # post a sample alert, change nothing
 
-Optional environment variables:
-  ROBLOX_PLACE_ID  place (or universe) ID of the game   [default: AOTR]
-  POLL_SECONDS     seconds between checks                [default: 300]
-  STATE_FILE       where the last-seen update is stored  [default: aotr_state.json]
+Environment variables:
+  DISCORD_WEBHOOK_URL  your Discord webhook URL (required)
+  ROBLOX_PLACE_ID      any place ID of the game          [default: AOTR]
+  ROBLOX_PLACE_IDS     optional comma list; track exactly these places instead
+  POLL_SECONDS         seconds between checks             [default: 300]
+  STATE_FILE           where last-seen versions are kept  [default: aotr_state.json]
 """
 
 import argparse
@@ -30,11 +30,15 @@ from pathlib import Path
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 PLACE_ID = os.environ.get("ROBLOX_PLACE_ID", "4658598196")
+PLACE_IDS_OVERRIDE = [p.strip() for p in os.environ.get("ROBLOX_PLACE_IDS", "").split(",") if p.strip()]
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "300"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "aotr_state.json"))
 
-# Discord's Cloudflare layer rejects the default Python user agent, so set one.
-USER_AGENT = "aotr-update-watcher/1.0"
+TRACKER_NAME = "AOTR Update Tracker"
+EMBED_COLOR = 0x8B5CF6
+MAX_LISTED = 10
+
+USER_AGENT = "aotr-update-watcher/2.0"
 
 
 def http_json(url, payload=None):
@@ -46,37 +50,77 @@ def http_json(url, payload=None):
     req = urllib.request.Request(url, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=20) as resp:
         body = resp.read()
-        return json.loads(body) if body else None  # Discord replies 204 (empty)
-
-
-def resolve_universe_id(place_id):
-    """Roblox tracks updates per universe (the whole game), not per place."""
-    try:
-        info = http_json(
-            f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
-        )
-        return int(info["universeId"])
-    except (urllib.error.HTTPError, KeyError, TypeError, ValueError):
-        return int(place_id)  # maybe a universe ID was supplied directly
-
-
-def fetch_game(universe_id):
-    data = http_json(
-        f"https://games.roblox.com/v1/games?universeIds={universe_id}"
-    ).get("data", [])
-    if not data:
-        raise RuntimeError(
-            f"No game found for ID {universe_id}. Check ROBLOX_PLACE_ID."
-        )
-    return data[0]
+        return json.loads(body) if body else None
 
 
 def parse_ts(value):
-    """Roblox timestamps have 1-7 fractional digits; normalise before parsing."""
     value = re.sub(r"\.(\d+)", lambda m: "." + m.group(1)[:6].ljust(6, "0"), value)
     value = value.replace("Z", "+00:00")
     dt = datetime.fromisoformat(value)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def resolve_universe_id(place_id):
+    try:
+        info = http_json(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe")
+        return int(info["universeId"])
+    except (urllib.error.HTTPError, KeyError, TypeError, ValueError):
+        return int(place_id)
+
+
+def fetch_game(universe_id):
+    data = http_json(f"https://games.roblox.com/v1/games?universeIds={universe_id}").get("data", [])
+    if not data:
+        raise RuntimeError(f"No game found for ID {universe_id}. Check ROBLOX_PLACE_ID.")
+    return data[0]
+
+
+def fetch_icon(universe_id):
+    try:
+        d = http_json(
+            "https://thumbnails.roblox.com/v1/games/icons"
+            f"?universeIds={universe_id}&returnPolicy=PlaceHolder&size=256x256&format=Png"
+        )
+        return d["data"][0].get("imageUrl")
+    except Exception:
+        return None
+
+
+def list_places(universe_id):
+    if PLACE_IDS_OVERRIDE:
+        return [{"id": p, "name": None} for p in PLACE_IDS_OVERRIDE]
+    places, cursor = [], None
+    while True:
+        url = f"https://develop.roblox.com/v1/universes/{universe_id}/places?limit=100&sortOrder=Asc"
+        if cursor:
+            url += f"&cursor={cursor}"
+        page = http_json(url)
+        for p in page.get("data", []):
+            places.append({"id": str(p["id"]), "name": p.get("name")})
+        cursor = page.get("nextPageCursor")
+        if not cursor:
+            return places
+
+
+def fetch_place(place_id):
+    d = http_json(f"https://economy.roblox.com/v2/assets/{place_id}/details")
+    return d.get("Name"), d["Updated"]
+
+
+def gather(universe_id):
+    places = list_places(universe_id)
+    current = {}
+    for p in places:
+        try:
+            name, updated = fetch_place(p["id"])
+        except Exception as exc:
+            print(f"Skipping place {p['id']}: {exc}", file=sys.stderr)
+            continue
+        current[p["id"]] = {"name": p["name"] or name or p["id"], "updated": updated}
+        time.sleep(0.3)
+    if not current:
+        raise RuntimeError("Could not read any places from Roblox.")
+    return len(places), current
 
 
 def load_state():
@@ -86,82 +130,94 @@ def load_state():
         return {}
 
 
-def save_state(state):
-    STATE_FILE.write_text(json.dumps(state))
+def save_state(places):
+    STATE_FILE.write_text(json.dumps({"places": places}))
 
 
-def post_discord(embed):
-    http_json(
-        WEBHOOK_URL,
-        {"username": "AOTR Update Watcher", "embeds": [embed]},
-    )
+def post_discord(payload):
+    http_json(WEBHOOK_URL, {"username": TRACKER_NAME, **payload})
 
 
-def build_update_embed(game, previous_updated):
-    updated = parse_ts(game["updated"])
-    epoch = int(updated.timestamp())
-    fields = [
-        {"name": "Published", "value": f"<t:{epoch}:F>", "inline": True},
-        {"name": "Playing now", "value": f"{game.get('playing', 0):,}", "inline": True},
-    ]
-    if previous_updated:
-        prev_epoch = int(parse_ts(previous_updated).timestamp())
-        fields.append(
-            {"name": "Previous update", "value": f"<t:{prev_epoch}:R>", "inline": True}
-        )
-    return {
-        "title": f"{game['name']} just updated",
-        "url": f"https://www.roblox.com/games/{game.get('rootPlaceId', PLACE_ID)}",
-        "description": f"A new version was published <t:{epoch}:R>.",
-        "color": 0x2ECC71,
-        "fields": fields,
-        "timestamp": updated.isoformat(),
+def build_update_embed(game, changed_ids, current, total, icon):
+    changed = sorted(changed_ids, key=lambda pid: parse_ts(current[pid]["updated"]), reverse=True)
+    newest = changed[0]
+    epoch = int(parse_ts(current[newest]["updated"]).timestamp())
+    n = len(changed)
+    lines = [f"• {current[pid]['name']} (`{pid}`)" for pid in changed[:MAX_LISTED]]
+    if n > MAX_LISTED:
+        lines.append(f"…and {n - MAX_LISTED} more")
+    embed = {
+        "title": game["name"],
+        "description": f"**{n} place{'s' if n != 1 else ''} updated.**",
+        "color": EMBED_COLOR,
+        "fields": [
+            {"name": "Most recent change detected", "value": f"<t:{epoch}:F> • <t:{epoch}:R>"},
+            {"name": "Place ID", "value": f"`{newest}`"},
+            {"name": "Places Updated", "value": "\n".join(lines)},
+        ],
+        "footer": {"text": f"{TRACKER_NAME} • {total} places tracked"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    if icon:
+        embed["thumbnail"] = {"url": icon}
+    return embed
 
 
-def check_once(universe_id):
+def check_once(universe_id, preview=False):
     game = fetch_game(universe_id)
-    current = game["updated"]
-    state = load_state()
-    previous = state.get("updated")
+    total, current = gather(universe_id)
 
-    if previous is None:
-        # First run: confirm the webhook works and remember the baseline.
-        post_discord(
-            {
-                "title": f"Now watching {game['name']}",
-                "description": "I'll post here when a new update goes live.",
-                "color": 0x3498DB,
-            }
-        )
-        save_state({"updated": current})
-        print(f"Baseline stored: {current}")
-    elif current != previous:
-        post_discord(build_update_embed(game, previous))
-        save_state({"updated": current})  # saved only after a successful post
-        print(f"Update detected: {previous} -> {current}")
+    if preview:
+        newest = max(current, key=lambda pid: parse_ts(current[pid]["updated"]))
+        post_discord({
+            "content": "Preview of the update alert (sample data, nothing was saved):",
+            "embeds": [build_update_embed(game, [newest], current, total, fetch_icon(universe_id))],
+        })
+        print("Preview posted")
+        return
+
+    saved = load_state().get("places")
+    now_seen = {pid: v["updated"] for pid, v in current.items()}
+
+    if saved is None:
+        post_discord({"embeds": [{
+            "title": f"Now watching {game['name']}",
+            "description": f"Tracking {total} places. I'll post here when any of them update.",
+            "color": EMBED_COLOR,
+        }]})
+        save_state(now_seen)
+        print(f"Baseline stored for {len(now_seen)} places")
+        return
+
+    changed = [pid for pid, ts in now_seen.items() if pid in saved and saved[pid] != ts]
+    if changed:
+        post_discord({"embeds": [build_update_embed(game, changed, current, total, fetch_icon(universe_id))]})
+        print(f"Updated places: {', '.join(changed)}")
     else:
-        print(f"No change ({current})")
+        print("No change")
+    save_state({**saved, **now_seen})
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    parser = argparse.ArgumentParser(description="AOTR place update tracker")
     parser.add_argument("--once", action="store_true", help="check once and exit")
+    parser.add_argument("--preview", action="store_true", help="post a sample alert and exit")
     args = parser.parse_args()
 
     if not WEBHOOK_URL.startswith("https://"):
         sys.exit("Set DISCORD_WEBHOOK_URL to your Discord webhook URL first.")
 
     universe_id = resolve_universe_id(PLACE_ID)
+    single = args.once or args.preview
 
     while True:
         try:
-            check_once(universe_id)
-        except Exception as exc:  # keep the watcher alive through network blips
+            check_once(universe_id, preview=args.preview)
+        except Exception as exc:
             print(f"Check failed: {exc}", file=sys.stderr)
-            if args.once:
+            if single:
                 sys.exit(1)
-        if args.once:
+        if single:
             break
         time.sleep(POLL_SECONDS)
 
