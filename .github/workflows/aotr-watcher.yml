@@ -2,8 +2,10 @@ name: AOTR update watcher
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub's minimum is 5)
-  workflow_dispatch:          # lets you start it by hand from the Actions tab
+    - cron: "*/10 * * * *"   # backup fallback schedule
+  repository_dispatch:        # allows cron-job.org to trigger this workflow instantly
+    types: [check_updates]
+  workflow_dispatch:          # manual trigger button
     inputs:
       preview:
         description: "Post a sample alert to Discord (saves nothing)"
