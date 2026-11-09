@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AOTR place update tracker -> Discord webhook
+AOTR place update tracker -> Discord webhook (Optimized)
 
 Tracks every place (map) inside the AOTR game and posts a Discord embed when
 one or more of them get a new version. Standard library only (Python 3.8+).
@@ -8,13 +8,6 @@ one or more of them get a new version. Standard library only (Python 3.8+).
   python3 aotr_update_watcher.py            # check forever, every 5 minutes
   python3 aotr_update_watcher.py --once     # single check (cron / GitHub Actions)
   python3 aotr_update_watcher.py --preview  # post a sample alert, change nothing
-
-Environment variables:
-  DISCORD_WEBHOOK_URL  your Discord webhook URL (required)
-  ROBLOX_PLACE_ID      any place ID of the game          [default: AOTR]
-  ROBLOX_PLACE_IDS     optional comma list; track exactly these places instead
-  POLL_SECONDS         seconds between checks             [default: 300]
-  STATE_FILE           where last-seen versions are kept  [default: aotr_state.json]
 """
 
 import argparse
@@ -25,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,20 +31,34 @@ STATE_FILE = Path(os.environ.get("STATE_FILE", "aotr_state.json"))
 TRACKER_NAME = "AOTR Update Tracker"
 EMBED_COLOR = 0x8B5CF6
 MAX_LISTED = 10
+MAX_WORKERS = 10  # Parallel threads for fast Roblox API checks
 
-USER_AGENT = "aotr-update-watcher/2.0"
+USER_AGENT = "aotr-update-watcher/2.1"
 
 
-def http_json(url, payload=None):
+def http_json(url, payload=None, retries=3):
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     data = None
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        body = resp.read()
-        return json.loads(body) if body else None
+    
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read()
+                return json.loads(body) if body else None
+        except urllib.error.HTTPError as err:
+            if err.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(1 + attempt)
+                continue
+            raise
+        except urllib.error.URLError:
+            if attempt < retries - 1:
+                time.sleep(1 + attempt)
+                continue
+            raise
 
 
 def parse_ts(value):
@@ -102,22 +110,29 @@ def list_places(universe_id):
             return places
 
 
-def fetch_place(place_id):
-    d = http_json(f"https://economy.roblox.com/v2/assets/{place_id}/details")
-    return d.get("Name"), d["Updated"]
+def fetch_place(place):
+    pid = place["id"]
+    d = http_json(f"https://economy.roblox.com/v2/assets/{pid}/details")
+    name = d.get("Name")
+    updated = d["Updated"]
+    return pid, {"name": place["name"] or name or pid, "updated": updated}
 
 
 def gather(universe_id):
     places = list_places(universe_id)
     current = {}
-    for p in places:
-        try:
-            name, updated = fetch_place(p["id"])
-        except Exception as exc:
-            print(f"Skipping place {p['id']}: {exc}", file=sys.stderr)
-            continue
-        current[p["id"]] = {"name": p["name"] or name or p["id"], "updated": updated}
-        time.sleep(0.3)
+    
+    # Fetch details for all places concurrently in parallel
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(fetch_place, p): p for p in places}
+        for future in as_completed(futures):
+            p_info = futures[future]
+            try:
+                pid, data = future.result()
+                current[pid] = data
+            except Exception as exc:
+                print(f"Skipping place {p_info['id']}: {exc}", file=sys.stderr)
+
     if not current:
         raise RuntimeError("Could not read any places from Roblox.")
     return len(places), current
@@ -131,7 +146,7 @@ def load_state():
 
 
 def save_state(places):
-    STATE_FILE.write_text(json.dumps({"places": places}))
+    STATE_FILE.write_text(json.dumps({"places": places}, indent=2))
 
 
 def post_discord(payload):
