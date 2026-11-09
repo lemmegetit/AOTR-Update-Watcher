@@ -2,7 +2,7 @@ name: AOTR update watcher
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub's minimum is 5)
+    - cron: "*/5 * * * *"   # every 10 minutes (GitHub's minimum is 5)
   workflow_dispatch:          # lets you start it by hand from the Actions tab
     inputs:
       preview:
