@@ -2,11 +2,16 @@ name: AOTR update watcher
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
-  workflow_dispatch:          # lets you start it by hand
+    - cron: "*/10 * * * *"   # every 10 minutes (GitHub's minimum is 5)
+  workflow_dispatch:          # lets you start it by hand from the Actions tab
+    inputs:
+      preview:
+        description: "Post a sample alert to Discord (saves nothing)"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write             # needed to save state and keepalive files
+  contents: write             # needed to save state and keepalive files back to the repo
 
 concurrency:
   group: aotr-watcher
@@ -22,7 +27,7 @@ jobs:
       - name: Check for AOTR place updates
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PREVIEW: ${{ inputs.preview }}
+          PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.preview || 'false' }}
         run: |
           if [ "$PREVIEW" = "true" ]; then
             python3 aotr_update_watcher.py --preview
