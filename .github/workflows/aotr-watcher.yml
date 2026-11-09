@@ -2,16 +2,11 @@ name: AOTR update watcher
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 10 minutes (GitHub's minimum is 5)
-  workflow_dispatch:          # lets you start it by hand from the Actions tab
-    inputs:
-      preview:
-        description: "Post a sample alert to Discord (saves nothing)"
-        type: boolean
-        default: false
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch:          # lets you start it by hand
 
 permissions:
-  contents: write             # needed to save aotr_state.json back to the repo
+  contents: write             # needed to save state and keepalive files
 
 concurrency:
   group: aotr-watcher
@@ -41,3 +36,16 @@ jobs:
           git config user.email "aotr-watcher@users.noreply.github.com"
           git add aotr_state.json
           git diff --staged --quiet || (git commit -m "Update state" && git pull --rebase && git push)
+
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Touch keepalive file
+        run: |
+          mkdir -p .github
+          date -u > .github/keepalive.txt
+          git config user.name "aotr-watcher"
+          git config user.email "aotr-watcher@users.noreply.github.com"
+          git add .github/keepalive.txt
+          git diff --staged --quiet || (git commit -m "Automated keepalive ping" && git push)
