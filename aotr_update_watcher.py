@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AOTR place update tracker -> Discord webhook (Optimized)
+AOTR place update tracker -> Discord webhook (Rate-Limit Protected)
 
 Tracks every place (map) inside the AOTR game and posts a Discord embed when
 one or more of them get a new version. Standard library only (Python 3.8+).
@@ -31,12 +31,12 @@ STATE_FILE = Path(os.environ.get("STATE_FILE", "aotr_state.json"))
 TRACKER_NAME = "AOTR Update Tracker"
 EMBED_COLOR = 0x8B5CF6
 MAX_LISTED = 10
-MAX_WORKERS = 10  # Parallel threads for fast Roblox API checks
+MAX_WORKERS = 4  # Reduced worker threads to avoid Roblox rate limits (HTTP 429)
 
-USER_AGENT = "aotr-update-watcher/2.1"
+USER_AGENT = "aotr-update-watcher/2.2"
 
 
-def http_json(url, payload=None, retries=3):
+def http_json(url, payload=None, retries=4):
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     data = None
     if payload is not None:
@@ -51,12 +51,12 @@ def http_json(url, payload=None, retries=3):
                 return json.loads(body) if body else None
         except urllib.error.HTTPError as err:
             if err.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                time.sleep(1 + attempt)
+                time.sleep(2 * (attempt + 1))  # Exponential backoff on rate limits
                 continue
             raise
         except urllib.error.URLError:
             if attempt < retries - 1:
-                time.sleep(1 + attempt)
+                time.sleep(2 * (attempt + 1))
                 continue
             raise
 
@@ -111,6 +111,7 @@ def list_places(universe_id):
 
 
 def fetch_place(place):
+    time.sleep(0.1)  # Micro delay per request to avoid hitting 429 rate limits
     pid = place["id"]
     d = http_json(f"https://economy.roblox.com/v2/assets/{pid}/details")
     name = d.get("Name")
@@ -122,7 +123,6 @@ def gather(universe_id):
     places = list_places(universe_id)
     current = {}
     
-    # Fetch details for all places concurrently in parallel
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_place, p): p for p in places}
         for future in as_completed(futures):
