@@ -2,18 +2,18 @@ name: AOTR update watcher
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # backup fallback schedule
-  repository_dispatch:        # allows cron-job.org to trigger this workflow instantly
+    - cron: "*/30 * * * *"    # fallback; cron-job.org triggers the frequent checks
+  repository_dispatch:         # lets cron-job.org start a check
     types: [check_updates]
-  workflow_dispatch:          # manual trigger button
+  workflow_dispatch:           # lets you start it by hand from the Actions tab
     inputs:
       preview:
-        description: "Post a sample alert to Discord (saves nothing)"
+        description: "Post a sample of every alert to Discord (saves nothing)"
         type: boolean
         default: false
 
 permissions:
-  contents: write             # needed to save state and keepalive files back to the repo
+  contents: write              # needed to save aotr_state.json back to the repo
 
 concurrency:
   group: aotr-watcher
@@ -26,9 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check for AOTR place updates
+      - name: Check AOTR
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_PING: ${{ secrets.DISCORD_PING }}
           PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.preview || 'false' }}
         run: |
           if [ "$PREVIEW" = "true" ]; then
@@ -37,22 +38,10 @@ jobs:
             python3 aotr_update_watcher.py --once
           fi
 
-      - name: Remember the latest updates
+      - name: Save state
+        if: ${{ !cancelled() }}
         run: |
           git config user.name "aotr-watcher"
           git config user.email "aotr-watcher@users.noreply.github.com"
           git add aotr_state.json
           git diff --staged --quiet || (git commit -m "Update state" && git pull --rebase && git push)
-
-  keepalive:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Touch keepalive file
-        run: |
-          mkdir -p .github
-          date -u > .github/keepalive.txt
-          git config user.name "aotr-watcher"
-          git config user.email "aotr-watcher@users.noreply.github.com"
-          git add .github/keepalive.txt
-          git diff --staged --quiet || (git commit -m "Automated keepalive ping" && git push)
