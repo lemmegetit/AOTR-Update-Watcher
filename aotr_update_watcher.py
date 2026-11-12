@@ -87,4 +87,92 @@ def fetch_icon(universe_id):
     try:
         d = http_json(
             "https://thumbnails.roblox.com/v1/games/icons"
-            f"?universe
+            f"?universeIds={universe_id}&returnPolicy=PlaceHolder&size=256x256&format=Png"
+        )
+        return d["data"][0].get("imageUrl")
+    except Exception:
+        return None
+
+
+def list_places(universe_id):
+    if PLACE_IDS_OVERRIDE:
+        return [{"id": p, "name": None} for p in PLACE_IDS_OVERRIDE]
+    places, cursor = [], None
+    while True:
+        url = f"https://develop.roblox.com/v1/universes/{universe_id}/places?limit=100&sortOrder=Asc"
+        if cursor:
+            url += f"&cursor={cursor}"
+        page = http_json(url)
+        for p in page.get("data", []):
+            places.append({"id": str(p["id"]), "name": p.get("name")})
+        cursor = page.get("nextPageCursor")
+        if not cursor:
+            return places
+
+
+def fetch_place(place):
+    time.sleep(0.1)  # Micro delay per request to avoid hitting 429 rate limits
+    pid = place["id"]
+    d = http_json(f"https://economy.roblox.com/v2/assets/{pid}/details")
+    name = d.get("Name")
+    updated = d["Updated"]
+    return pid, {"name": place["name"] or name or pid, "updated": updated}
+
+
+def gather(universe_id):
+    places = list_places(universe_id)
+    current = {}
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(fetch_place, p): p for p in places}
+        for future in as_completed(futures):
+            p_info = futures[future]
+            try:
+                pid, data = future.result()
+                current[pid] = data
+            except Exception as exc:
+                print(f"Skipping place {p_info['id']}: {exc}", file=sys.stderr)
+
+    if not current:
+        raise RuntimeError("Could not read any places from Roblox.")
+    return len(places), current
+
+
+def load_state():
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(places):
+    STATE_FILE.write_text(json.dumps({"places": places}, indent=2))
+
+
+def post_discord(payload):
+    http_json(WEBHOOK_URL, {"username": TRACKER_NAME, **payload})
+
+
+def build_update_embed(game, changed_ids, current, total, icon):
+    changed = sorted(changed_ids, key=lambda pid: parse_ts(current[pid]["updated"]), reverse=True)
+    newest = changed[0]
+    epoch = int(parse_ts(current[newest]["updated"]).timestamp())
+    n = len(changed)
+    lines = [f"• {current[pid]['name']} (`{pid}`)" for pid in changed[:MAX_LISTED]]
+    if n > MAX_LISTED:
+        lines.append(f"…and {n - MAX_LISTED} more")
+    
+    embed = {
+        "title": game["name"],
+        "description": f"**{n} place{'s' if n != 1 else ''} updated.**",
+        "color": EMBED_COLOR,
+        "fields": [
+            {"name": "Most recent change detected", "value": f"<t:{epoch}:F> • <t:{epoch}:R>"},
+            {"name": "Place ID", "value": f"`{newest}`"},
+            {"name": "Places Updated", "value": "\n".join(lines)},
+        ],
+        "footer": {"text": f"{TRACKER_NAME} • {total} places tracked"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if icon:
+        embed["thumbnail"]
