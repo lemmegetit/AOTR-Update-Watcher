@@ -2,35 +2,35 @@ name: AOTR update watcher
 
 on:
   schedule:
-    - cron: "*/30 * * * *"    # fallback; cron-job.org triggers the frequent checks
-  repository_dispatch:         # lets cron-job.org start a check
+    - cron: "*/10 * * * *"
+  repository_dispatch:
     types: [check_updates]
-  workflow_dispatch:           # lets you start it by hand from the Actions tab
+  workflow_dispatch:
     inputs:
       preview:
-        description: "Post a sample of every alert to Discord (saves nothing)"
+        description: "Post a sample alert to Discord (saves nothing)"
         type: boolean
         default: false
 
 permissions:
-  contents: write              # needed to save aotr_state.json back to the repo
-
-concurrency:
-  group: aotr-watcher
-  cancel-in-progress: false
+  contents: write
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Check AOTR
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for AOTR place updates
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          DISCORD_PING: ${{ secrets.DISCORD_PING }}
-          PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.preview || 'false' }}
+          PREVIEW: ${{ github.event.inputs.preview }}
         run: |
           if [ "$PREVIEW" = "true" ]; then
             python3 aotr_update_watcher.py --preview
@@ -38,10 +38,10 @@ jobs:
             python3 aotr_update_watcher.py --once
           fi
 
-      - name: Save state
-        if: ${{ !cancelled() }}
+      - name: Commit updated state
         run: |
-          git config user.name "aotr-watcher"
-          git config user.email "aotr-watcher@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add aotr_state.json
-          git diff --staged --quiet || (git commit -m "Update state" && git pull --rebase && git push)
+          git diff --staged --quiet || git commit -m "chore: update AOTR place state [skip ci]"
+          git push
